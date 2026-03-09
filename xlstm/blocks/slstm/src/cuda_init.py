@@ -2,24 +2,28 @@
 # Korbinian Poeppel
 
 import os
-from typing import Sequence, Union
+import shlex
 import logging
+from typing import Sequence
 
 import time
 import random
 
 import torch
-from torch.utils.cpp_extension import load as _load
+from torch.utils.cpp_extension import include_paths as _include_paths, load as _load
 
 LOGGER = logging.getLogger(__name__)
 
 
-def defines_to_cflags(defines=Union[dict[str, Union[int, str]], Sequence[tuple[str, Union[str, int]]]]):
-    cflags = []
-    print(defines)
+def defines_to_cflags(
+    defines: dict[str, int | str] | Sequence[tuple[str, str | int]] = (),
+):
+    cflags: list[str] = []
     if isinstance(defines, dict):
-        defines = defines.items()
-    for key, val in defines:
+        items = [(key, val) for key, val in defines.items()]
+    else:
+        items = list(defines)
+    for key, val in items:
         cflags.append(f"-D{key}={str(val)}")
     return cflags
 
@@ -27,21 +31,38 @@ def defines_to_cflags(defines=Union[dict[str, Union[int, str]], Sequence[tuple[s
 curdir = os.path.dirname(__file__)
 
 if torch.cuda.is_available():
-    from packaging import version
-
-    if version.parse(torch.__version__) >= version.parse("2.6.0"):
-        os.environ["CUDA_LIB"] = os.path.join(
-            os.path.split(torch.utils.cpp_extension.include_paths(device_type="cuda")[-1])[0], "lib"
-        )
-    else:
-        os.environ["CUDA_LIB"] = os.path.join(
-            os.path.split(torch.utils.cpp_extension.include_paths(cuda=True)[-1])[0], "lib"
-        )
+    os.environ["CUDA_LIB"] = os.path.join(
+        os.path.split(_include_paths(device_type="cuda")[-1])[0], "lib"
+    )
 
 
 EXTRA_INCLUDE_PATHS = (
-    tuple(os.environ["XLSTM_EXTRA_INCLUDE_PATHS"].split(":")) if "XLSTM_EXTRA_INCLUDE_PATHS" in os.environ else ()
+    tuple(os.environ["XLSTM_EXTRA_INCLUDE_PATHS"].split(":"))
+    if "XLSTM_EXTRA_INCLUDE_PATHS" in os.environ
+    else ()
 )
+
+
+def _extra_cuda_flags_from_env() -> tuple[str, ...]:
+    raw = os.environ.get("XLSTM_EXTRA_CUDA_FLAGS")
+    if raw is None:
+        return ()
+    return tuple(flag for flag in shlex.split(raw) if flag)
+
+
+def _with_unique_flags(*groups: Sequence[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for flag in group:
+            if flag in seen:
+                continue
+            seen.add(flag)
+            ordered.append(flag)
+    return ordered
+
+
+DEFAULT_EXTRA_CUDA_FLAGS: tuple[str, ...] = ("-static-global-template-stub=false",)
 if "CONDA_PREFIX" in os.environ:
     # This enforces adding the correct include directory from the CUDA installation via torch. If you use the system
     # installation, you might have to add the cflags yourself.
@@ -53,7 +74,9 @@ if "CONDA_PREFIX" in os.environ:
         matching_dirs = glob.glob(f"{os.environ['CONDA_PREFIX']}/targets/**", recursive=True)
         EXTRA_INCLUDE_PATHS = (
             EXTRA_INCLUDE_PATHS
-            + tuple(map(str, (Path(os.environ["CONDA_PREFIX"]) / "targets").glob("**/include/")))[:1]
+            + tuple(map(str, (Path(os.environ["CONDA_PREFIX"]) / "targets").glob("**/include/")))[
+                :1
+            ]
         )
 
 
@@ -105,6 +128,7 @@ def load(*, name, sources, extra_cflags=(), extra_cuda_cflags=(), **kwargs):
             "--extra-device-vectorization",
             *extra_cflags,
             *extra_cuda_cflags,
+            *_with_unique_flags(DEFAULT_EXTRA_CUDA_FLAGS, _extra_cuda_flags_from_env()),
         ],
     }
     print(myargs)
